@@ -48,7 +48,10 @@ npm run dev:worker # Inicia el Worker (polling)
 
 1. Conecta tu repositorio de GitHub.
 2. **Servicio Web**: Crea un servicio para `apps/web`.
-3. **Servicio Worker**: Crea un servicio para `apps/worker`. Configura un **Cron Schedule** (ej: `*/10 * * * *`) para ejecutar `npm start`.
+   - Variable `SERVICE_TYPE` = `web`
+3. **Servicio Worker**: Crea un servicio para `apps/worker`.
+   - Variable `SERVICE_TYPE` = `worker`
+   - Configura un **Cron Schedule** (ej: `*/10 * * * *`) para ejecutar `npm start`.
 4. **Variables de Entorno**: Asegúrate de que las variables `NEXT_PUBLIC_SUPABASE_URL` y `NEXT_PUBLIC_SUPABASE_ANON_KEY` estén configuradas correctamente en Railway.
 
 ## Roles del Sistema
