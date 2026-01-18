@@ -1,0 +1,20 @@
+{
+  "name": "@flight-tracker/worker",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "tsx src/run.ts",
+    "dev": "tsx watch src/run.ts",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.38.0",
+    "@flight-tracker/shared": "*",
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.0",
+    "crypto": "0.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0"
+  }
+}
