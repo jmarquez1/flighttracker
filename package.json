@@ -9,7 +9,7 @@
     "dev:web": "npm run dev -w apps/web",
     "dev:worker": "npm run dev -w apps/worker",
     "build": "npm run build --workspaces",
-    "start": "if [ \"$SERVICE_TYPE\" = \"worker\" ]; then npm run start:worker; else npm run start:web; fi",
+    "start": "node -e \"const cp = require('child_process'); const cmd = process.env.SERVICE_TYPE === 'worker' ? 'npm run start:worker' : 'npm run start:web'; cp.execSync(cmd, { stdio: 'inherit' });\"",
     "start:web": "npm run start -w apps/web",
     "start:worker": "npm run start -w apps/worker",
     "lint": "npm run lint --workspaces"
