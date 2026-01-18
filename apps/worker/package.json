@@ -12,7 +12,8 @@
     "@flight-tracker/shared": "*",
     "axios": "^1.6.0",
     "dotenv": "^16.3.0",
-    "crypto": "0.0.3"
+    "crypto": "0.0.3",
+    "tsx": "^4.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0"
