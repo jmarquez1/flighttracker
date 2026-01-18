@@ -9,15 +9,17 @@
     "dev:web": "npm run dev -w apps/web",
     "dev:worker": "npm run dev -w apps/worker",
     "build": "npm run build --workspaces",
-    "start": "npm run start:web",
+    "start": "concurrently --kill-others \"npm run start:web\" \"npm run start:worker\"",
     "start:web": "npm run start -w apps/web",
     "start:worker": "npm run start -w apps/worker",
     "lint": "npm run lint --workspaces"
   },
+  "dependencies": {
+    "concurrently": "^9.1.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
   "devDependencies": {
-    "concurrently": "^9.2.1",
-    "rimraf": "^5.0.0",
-    "tsx": "^4.21.0",
-    "typescript": "^5.9.3"
+    "rimraf": "^5.0.0"
   }
 }
