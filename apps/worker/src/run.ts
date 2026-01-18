@@ -189,7 +189,7 @@ async function processFlight(flight: any) {
 }
 
 async function run() {
-  console.log('Worker started at:', new Date().toISOString());
+  console.log('Worker cycle started at:', new Date().toISOString());
 
   // Check if paused
   const { data: settings } = await supabase.from('settings').select('*').eq('id', 1).single();
@@ -219,11 +219,30 @@ async function run() {
     if (!shouldContinue) break;
   }
 
-  console.log('Worker finished at:', new Date().toISOString());
-  process.exit(0);
+  console.log('Worker cycle finished at:', new Date().toISOString());
 }
 
-run().catch(err => {
+async function start() {
+  const isContinuous = process.env.RUN_CONTINUOUS === 'true' || process.env.SERVICE_TYPE === 'combined' || !process.env.SERVICE_TYPE;
+  
+  if (isContinuous) {
+    console.log('Worker running in continuous mode (every 10 minutes)');
+    while (true) {
+      try {
+        await run();
+      } catch (err) {
+        console.error('Iteration error:', err);
+      }
+      // Wait 10 minutes
+      await new Promise(resolve => setTimeout(resolve, 10 * 60 * 1000));
+    }
+  } else {
+    await run();
+    process.exit(0);
+  }
+}
+
+start().catch(err => {
   console.error('Fatal error:', err);
   process.exit(1);
 });
