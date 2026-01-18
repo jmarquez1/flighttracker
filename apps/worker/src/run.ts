@@ -9,15 +9,29 @@ import { formatNotification } from './lib/formatter';
 
 dotenv.config();
 
-const SUPABASE_URL = process.env.SUPABASE_URL || '';
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-const AVIATIONSTACK_KEY = process.env.AVIATIONSTACK_KEY || '';
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const AVIATIONSTACK_KEY = process.env.AVIATIONSTACK_KEY;
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-const aviationstack = new AviationstackClient(AVIATIONSTACK_KEY);
+console.log('Worker Environment Check:', {
+  has_url: !!SUPABASE_URL,
+  has_key: !!SUPABASE_SERVICE_ROLE_KEY,
+  has_api: !!AVIATIONSTACK_KEY
+});
+
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  console.error('CRITICAL: Missing Supabase environment variables for Worker.');
+}
+
+const supabase = (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) 
+  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+  : null as any;
+
+const aviationstack = new AviationstackClient(AVIATIONSTACK_KEY || '');
 const notificationService = new NotificationService();
 
 function computeHash(state: FlightState): string {
+  if (!state) return '';
   return crypto.createHash('sha256').update(JSON.stringify(state)).digest('hex');
 }
 
@@ -189,6 +203,10 @@ async function processFlight(flight: any) {
 }
 
 async function run() {
+  if (!supabase) {
+    console.error('Worker cannot run: Supabase client not initialized.');
+    return;
+  }
   console.log('Worker cycle started at:', new Date().toISOString());
 
   // Check if paused
