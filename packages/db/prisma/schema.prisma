@@ -1,0 +1,293 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../generated/client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── TENANTS ──────────────────────────────────────────────────────────────────
+
+model Workspace {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique
+  logoUrl     String?
+  brandColor  String?  @default("#1e40af")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  users       WorkspaceUser[]
+  flights     Flight[]
+  orders      Order[]
+  contacts    Contact[]
+  alertRules  AlertRule[]
+  recipients  NotificationRecipient[]
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String?
+  passwordHash String?
+  createdAt    DateTime @default(now())
+
+  workspaces WorkspaceUser[]
+}
+
+model WorkspaceUser {
+  id          String    @id @default(cuid())
+  workspaceId String
+  userId      String
+  role        UserRole  @default(MEMBER)
+  joinedAt    DateTime  @default(now())
+
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+}
+
+enum UserRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+// ─── FLIGHTS ──────────────────────────────────────────────────────────────────
+
+model Flight {
+  id              String        @id @default(cuid())
+  workspaceId     String
+  flightIata      String        // e.g. "IB3456"
+  flightDate      String        // YYYY-MM-DD (scheduled departure date)
+  airline         String?
+  origin          String?       // IATA airport code
+  destination     String?       // IATA airport code
+  originCity      String?
+  destinationCity String?
+
+  // Live status
+  status          FlightStatus  @default(SCHEDULED)
+  depScheduled    DateTime?
+  depEstimated    DateTime?
+  depActual       DateTime?
+  arrScheduled    DateTime?
+  arrEstimated    DateTime?
+  arrActual       DateTime?
+  terminalDep     String?
+  gateDep         String?
+  terminalArr     String?
+  gateArr         String?
+  delayDepMin     Int?
+  delayArrMin     Int?
+
+  // Polling control
+  lastPolledAt    DateTime?
+  nextPollAt      DateTime?
+  pollingLocked   Boolean       @default(false)
+  pollingPaused   Boolean       @default(false)
+  pauseReason     String?
+
+  // Notification control
+  holdCustomerNotifications Boolean @default(false)
+  holdReason                String?
+
+  // External refs
+  externalRef     String?       // AeroDataBox flight ID
+  dataHash        String?       // SHA-256 of last polled data
+  lastState       String?       // JSON of last polled FlightState
+
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  workspace       Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  snapshots       FlightSnapshot[]
+  events          FlightEvent[]
+  orderFlights    OrderFlight[]
+  notifications   Notification[]
+
+  @@unique([workspaceId, flightIata, flightDate])
+  @@index([workspaceId, status])
+  @@index([nextPollAt])
+}
+
+enum FlightStatus {
+  SCHEDULED
+  BOARDING
+  ACTIVE
+  LANDED
+  CANCELLED
+  DIVERTED
+  INCIDENT
+  UNKNOWN
+}
+
+model FlightSnapshot {
+  id        String   @id @default(cuid())
+  flightId  String
+  hash      String
+  payload   Json
+  createdAt DateTime @default(now())
+
+  flight    Flight   @relation(fields: [flightId], references: [id], onDelete: Cascade)
+
+  @@index([flightId, createdAt])
+}
+
+model FlightEvent {
+  id         String    @id @default(cuid())
+  flightId   String
+  eventType  EventType
+  eventKey   String    @unique  // dedup key
+  oldValue   Json?
+  newValue   Json?
+  createdAt  DateTime  @default(now())
+
+  flight     Flight    @relation(fields: [flightId], references: [id], onDelete: Cascade)
+  notifications Notification[]
+
+  @@index([flightId, createdAt])
+}
+
+enum EventType {
+  CANCELLED
+  DIVERTED
+  DELAY_30
+  DELAY_60
+  DELAY_120
+  GATE_CHANGE
+  GATE_ASSIGNED
+  TERMINAL_CHANGE
+  SCHEDULE_CHANGE
+  DEPARTED
+  ARRIVED
+  LANDED
+  STATUS_CHANGE
+  BOARDING
+}
+
+// ─── ORDERS ───────────────────────────────────────────────────────────────────
+
+model Order {
+  id            String   @id @default(cuid())
+  workspaceId   String
+  reference     String   // Travel Biuro order reference
+  groupName     String?
+  customerName  String?
+  customerEmail String?
+  notes         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  workspace     Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  orderFlights  OrderFlight[]
+
+  @@unique([workspaceId, reference])
+  @@index([workspaceId])
+}
+
+model OrderFlight {
+  id        String   @id @default(cuid())
+  orderId   String
+  flightId  String
+  segment   Int      @default(1) // outbound=1, return=2, etc.
+  createdAt DateTime @default(now())
+
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  flight    Flight   @relation(fields: [flightId], references: [id], onDelete: Cascade)
+
+  @@unique([orderId, flightId])
+}
+
+// ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
+
+model NotificationRecipient {
+  id          String            @id @default(cuid())
+  workspaceId String
+  name        String
+  email       String
+  type        RecipientType     @default(STAFF)
+  isActive    Boolean           @default(true)
+  createdAt   DateTime          @default(now())
+
+  workspace   Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, type])
+}
+
+enum RecipientType {
+  STAFF       // always notified on all events
+  OPS         // notified on critical events only
+  CUSTOMER    // time-gated, status-aware
+}
+
+model AlertRule {
+  id            String    @id @default(cuid())
+  workspaceId   String
+  eventType     EventType
+  staffEnabled  Boolean   @default(true)
+  customerEnabled Boolean @default(false)
+  customerTiming CustomerTiming @default(MANUAL)  // when to notify customer
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  workspace     Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, eventType])
+}
+
+enum CustomerTiming {
+  IMMEDIATE
+  MANUAL      // staff must manually trigger
+}
+
+model Contact {
+  id          String   @id @default(cuid())
+  workspaceId String
+  name        String
+  email       String?
+  phone       String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  notifications Notification[]
+}
+
+model Notification {
+  id          String             @id @default(cuid())
+  flightId    String
+  eventId     String?
+  contactId   String?
+  recipientEmail String
+  recipientName  String?
+  channel     NotificationChannel @default(EMAIL)
+  subject     String?
+  body        String?
+  status      NotificationStatus  @default(PENDING)
+  sentAt      DateTime?
+  error       String?
+  provider    String?
+  providerId  String?
+  createdAt   DateTime @default(now())
+
+  flight      Flight       @relation(fields: [flightId], references: [id], onDelete: Cascade)
+  event       FlightEvent? @relation(fields: [eventId], references: [id])
+  contact     Contact?     @relation(fields: [contactId], references: [id])
+
+  @@index([flightId, createdAt])
+}
+
+enum NotificationChannel {
+  EMAIL
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+  SKIPPED
+}

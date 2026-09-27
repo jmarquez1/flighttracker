@@ -11,3 +11,8 @@ yarn-debug.log*
 yarn-error.log*
 .DS_Store
 *.pem
+
+# kept out of git (2026-09-27): dependencies, generated Prisma client, seed script with a password
+node_modules/
+packages/db/generated/
+apps/worker/src/seed_user.*

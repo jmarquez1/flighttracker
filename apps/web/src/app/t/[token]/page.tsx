@@ -1,129 +1,168 @@
-import { createClient } from '@supabase/supabase-js'
-import { Plane, Calendar, MapPin, Clock } from 'lucide-react'
-import { notFound } from 'next/navigation'
+import { PrismaClient } from '@flight-tracker/db';
+import { notFound } from 'next/navigation';
 
-export default async function PublicTripPortal({ params }: { params: { token: string } }) {
-  // Use anon client for public access
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-  )
+const prisma = new PrismaClient();
 
-  const { data: trip } = await supabase
-    .from('trips')
-    .select('*, organizations(name, logo_url, brand_color)')
-    .eq('public_token', params.token)
-    .single()
+const STATUS_LABEL: Record<string, { label: string; color: string; bg: string }> = {
+  SCHEDULED: { label: 'Scheduled',  color: 'text-blue-300',   bg: 'bg-blue-500/10 border-blue-500/20' },
+  BOARDING:  { label: 'Boarding',   color: 'text-sky-300',    bg: 'bg-sky-500/10 border-sky-500/20' },
+  ACTIVE:    { label: 'In Flight',  color: 'text-green-300',  bg: 'bg-green-500/10 border-green-500/20' },
+  LANDED:    { label: 'Landed',     color: 'text-gray-300',   bg: 'bg-gray-500/10 border-gray-500/20' },
+  CANCELLED: { label: 'Cancelled',  color: 'text-red-300',    bg: 'bg-red-500/10 border-red-500/20' },
+  DIVERTED:  { label: 'Diverted',   color: 'text-orange-300', bg: 'bg-orange-500/10 border-orange-500/20' },
+  UNKNOWN:   { label: 'Unknown',    color: 'text-yellow-300', bg: 'bg-yellow-500/10 border-yellow-500/20' },
+};
 
-  if (!trip) {
-    notFound()
-  }
+function fmtDt(dt: Date | null | undefined): string {
+  if (!dt) return '—';
+  return new Date(dt).toUTCString().replace(/:\d\d GMT$/, ' UTC');
+}
 
-  const { data: flights } = await supabase
-    .from('flights')
-    .select('*')
-    .eq('trip_id', trip.id)
-    .eq('is_active', true)
-    .order('dep_scheduled', { ascending: true })
+export default async function PublicTripPortal({ params }: { params: Promise<{ token: string }> }) {
+  const { token } = await params;
 
-  const brandColor = trip.organizations?.brand_color || '#4f46e5'
+  // Token is the order ID (public, no auth required — order IDs are opaque UUIDs)
+  const order = await prisma.order.findUnique({
+    where: { id: token },
+    include: {
+      orderFlights: {
+        include: {
+          flight: {
+            include: { events: { orderBy: { createdAt: 'desc' }, take: 10 } }
+          }
+        },
+        orderBy: { createdAt: 'asc' }
+      }
+    }
+  });
+
+  if (!order) notFound();
 
   return (
-    <div className="min-h-screen bg-gray-50 pb-12">
-      {/* Header / Branding */}
-      <header className="bg-white shadow-sm border-b" style={{ borderTop: `4px solid ${brandColor}` }}>
-        <div className="max-w-4xl mx-auto px-4 py-6 flex justify-between items-center">
+    <div className="min-h-screen bg-gray-950 text-gray-100 font-sans">
+      {/* Header */}
+      <div className="bg-gray-900 border-b border-gray-800 px-4 py-4">
+        <div className="max-w-2xl mx-auto flex items-center justify-between">
           <div>
-            <h1 className="text-xl font-bold text-gray-900">{trip.group_name}</h1>
-            <p className="text-sm text-gray-500">Trip updates by {trip.organizations?.name}</p>
+            <div className="text-xs text-gray-500 uppercase tracking-widest mb-0.5">Travel Biuro</div>
+            <div className="font-bold text-lg">Flight Status</div>
           </div>
-          {trip.organizations?.logo_url && (
-            <img src={trip.organizations.logo_url} alt="Logo" className="h-10 w-auto" />
-          )}
+          <div className="text-right">
+            <div className="text-xs text-gray-500">Booking reference</div>
+            <div className="font-mono font-bold text-blue-400">{order.reference}</div>
+          </div>
         </div>
-      </header>
+      </div>
 
-      <main className="max-w-4xl mx-auto px-4 mt-8">
-        <div className="space-y-6">
-          {flights?.map((flight) => (
-            <div key={flight.id} className="bg-white rounded-xl shadow-md overflow-hidden border border-gray-100">
-              <div className="p-6">
-                <div className="flex justify-between items-start mb-6">
-                  <div className="flex items-center">
-                    <Plane className="w-5 h-5 text-indigo-600 mr-2" />
-                    <span className="text-lg font-bold">{flight.flight_iata}</span>
+      <div className="max-w-2xl mx-auto px-4 py-8 space-y-6">
+        {order.orderFlights.length === 0 ? (
+          <div className="text-center py-16 text-gray-600">No flights linked to this booking.</div>
+        ) : (
+          order.orderFlights.map(({ flight }: any) => {
+            const cfg = STATUS_LABEL[flight.status] || STATUS_LABEL.UNKNOWN;
+            const isLate = flight.delayDepMin && flight.delayDepMin > 0;
+
+            return (
+              <div key={flight.id} className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
+                {/* Flight banner */}
+                <div className="bg-gray-800 px-5 py-4 flex items-center justify-between">
+                  <div>
+                    <div className="font-bold text-xl tracking-wide">{flight.flightIata}</div>
+                    <div className="text-sm text-gray-400 mt-0.5">{flight.airline}</div>
                   </div>
-                  <span className={`px-3 py-1 rounded-full text-xs font-bold uppercase ${
-                    flight.flight_status === 'active' ? 'bg-green-100 text-green-800' :
-                    flight.flight_status === 'landed' ? 'bg-blue-100 text-blue-800' :
-                    'bg-gray-100 text-gray-800'
-                  }`}>
-                    {flight.flight_status || 'Scheduled'}
+                  <span className={`text-sm font-bold px-3 py-1.5 rounded-full border ${cfg.bg} ${cfg.color}`}>
+                    {cfg.label}
                   </span>
                 </div>
 
-                <div className="flex justify-between items-center relative">
-                  {/* Origin */}
-                  <div className="flex-1">
-                    <div className="text-3xl font-black text-gray-900">{flight.dep_iata}</div>
-                    <div className="text-xs text-gray-500 uppercase font-medium">Departure</div>
-                    <div className="mt-2 flex items-center text-sm font-semibold">
-                      <Clock className="w-4 h-4 mr-1 text-gray-400" />
-                      {flight.dep_scheduled ? new Date(flight.dep_scheduled).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '-'}
+                {/* Route */}
+                <div className="bg-gray-850 border-b border-gray-800 px-5 py-4">
+                  <div className="flex items-center justify-between">
+                    <div className="text-center">
+                      <div className="text-3xl font-black tracking-wider">{flight.origin || '---'}</div>
+                      <div className="text-xs text-gray-500 mt-1 uppercase tracking-wider">{flight.originCity || ''}</div>
+                    </div>
+                    <div className="text-2xl text-gray-700">&#9992;</div>
+                    <div className="text-center">
+                      <div className="text-3xl font-black tracking-wider">{flight.destination || '---'}</div>
+                      <div className="text-xs text-gray-500 mt-1 uppercase tracking-wider">{flight.destinationCity || ''}</div>
                     </div>
                   </div>
+                </div>
 
-                  {/* Arrow */}
-                  <div className="px-4 flex flex-col items-center">
-                    <div className="h-0.5 w-16 bg-gray-200 relative">
-                      <div className="absolute right-0 -top-1">
-                        <Plane className="w-3 h-3 text-gray-300 transform rotate-90" />
+                {/* Flight details */}
+                <div className="px-5 py-4 space-y-2">
+                  <div className="grid grid-cols-2 gap-x-8 gap-y-2 text-sm">
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">Sched. Departure</span>
+                      <span className="font-semibold">{fmtDt(flight.depScheduled)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">Sched. Arrival</span>
+                      <span className="font-semibold">{fmtDt(flight.arrScheduled)}</span>
+                    </div>
+                    {flight.depEstimated && (
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">Est. Departure</span>
+                        <span className={`font-semibold ${isLate ? 'text-orange-400' : ''}`}>{fmtDt(flight.depEstimated)}</span>
+                      </div>
+                    )}
+                    {flight.arrEstimated && (
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">Est. Arrival</span>
+                        <span className="font-semibold">{fmtDt(flight.arrEstimated)}</span>
+                      </div>
+                    )}
+                    {flight.terminalDep && (
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">Terminal</span>
+                        <span className="font-bold text-indigo-300">T{flight.terminalDep}</span>
+                      </div>
+                    )}
+                    {flight.gateDep && (
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">Gate</span>
+                        <span className="font-bold text-blue-300">{flight.gateDep}</span>
+                      </div>
+                    )}
+                    {isLate && (
+                      <div className="flex justify-between col-span-2">
+                        <span className="text-gray-500">Delay</span>
+                        <span className="font-bold text-orange-400">+{flight.delayDepMin} min</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Recent events */}
+                  {flight.events.length > 0 && (
+                    <div className="mt-4 pt-4 border-t border-gray-800">
+                      <div className="text-xs text-gray-500 uppercase tracking-widest mb-3">Recent Updates</div>
+                      <div className="space-y-2">
+                        {flight.events.slice(0, 5).map((evt: any) => (
+                          <div key={evt.id} className="flex items-start gap-3 text-sm">
+                            <div className="w-1.5 h-1.5 rounded-full bg-blue-500 mt-1.5 flex-shrink-0"></div>
+                            <div className="flex-1 min-w-0">
+                              <span className="text-gray-300">{evt.eventType.replace(/_/g, ' ')}</span>
+                              {evt.newValue && <span className="text-gray-500 ml-2">→ {evt.newValue}</span>}
+                            </div>
+                            <div className="text-xs text-gray-600 flex-shrink-0">
+                              {new Date(evt.createdAt).toUTCString().slice(5, 22)} UTC
+                            </div>
+                          </div>
+                        ))}
                       </div>
                     </div>
-                  </div>
-
-                  {/* Destination */}
-                  <div className="flex-1 text-right">
-                    <div className="text-3xl font-black text-gray-900">{flight.arr_iata}</div>
-                    <div className="text-xs text-gray-500 uppercase font-medium">Arrival</div>
-                    <div className="mt-2 flex items-center justify-end text-sm font-semibold">
-                      <Clock className="w-4 h-4 mr-1 text-gray-400" />
-                      {flight.arr_scheduled ? new Date(flight.arr_scheduled).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '-'}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Details Bar */}
-                <div className="mt-8 pt-6 border-t border-gray-50 grid grid-cols-2 gap-4">
-                  <div className="flex items-center text-sm">
-                    <MapPin className="w-4 h-4 mr-2 text-gray-400" />
-                    <span className="text-gray-600 mr-1">Gate:</span>
-                    <span className="font-bold">{flight.gate_dep || '-'}</span>
-                  </div>
-                  <div className="flex items-center text-sm justify-end">
-                    <Clock className="w-4 h-4 mr-2 text-gray-400" />
-                    <span className="text-gray-600 mr-1">Delay:</span>
-                    <span className={`font-bold ${flight.delay_dep_min ? 'text-red-500' : 'text-green-600'}`}>
-                      {flight.delay_dep_min ? `${flight.delay_dep_min}m` : 'On Time'}
-                    </span>
-                  </div>
+                  )}
                 </div>
               </div>
-            </div>
-          ))}
+            );
+          })
+        )}
 
-          {(!flights || flights.length === 0) && (
-            <div className="text-center py-20 bg-white rounded-xl shadow-sm border border-dashed border-gray-300">
-              <Plane className="w-12 h-12 text-gray-200 mx-auto mb-4" />
-              <p className="text-gray-500">No flights currently scheduled for this trip.</p>
-            </div>
-          )}
-        </div>
-      </main>
-
-      <footer className="mt-20 text-center text-xs text-gray-400">
-        <p>Powered by Flight Tracker SaaS</p>
-      </footer>
+        <p className="text-center text-xs text-gray-700 pt-4">
+          Powered by Travel Biuro &middot; Flight data updates automatically
+        </p>
+      </div>
     </div>
-  )
+  );
 }

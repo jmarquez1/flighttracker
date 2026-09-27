@@ -1,266 +1,242 @@
-import { createClient } from '@supabase/supabase-js';
-import dotenv from 'dotenv';
+import 'dotenv/config';
 import crypto from 'crypto';
-import { FlightState, FlightStatus, EventType } from '@flight-tracker/shared';
-import { AviationstackClient } from './lib/aviationstack';
-import { detectEvents } from './lib/events';
-import { NotificationService } from './lib/notifications';
-import { formatNotification } from './lib/formatter';
+import { PrismaClient } from '@flight-tracker/db';
+import { detectEvents, getNextPollMs } from '@flight-tracker/shared';
+import { fetchFlight } from './lib/aerodata';
+import { sendAlert, buildFallbackHtml } from './lib/brevo';
 
-dotenv.config();
+const prisma = new PrismaClient();
+const POLL_INTERVAL_MS = 60 * 1000;
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const AVIATIONSTACK_KEY = process.env.AVIATIONSTACK_KEY;
-
-console.log('Worker Environment Check:', {
-  has_url: !!SUPABASE_URL,
-  has_key: !!SUPABASE_SERVICE_ROLE_KEY,
-  has_api: !!AVIATIONSTACK_KEY
-});
-
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-  console.error('CRITICAL: Missing Supabase environment variables for Worker.');
+function hash(obj: any): string {
+  return crypto.createHash('sha256').update(JSON.stringify(obj)).digest('hex');
 }
 
-const supabase = (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) 
-  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-  : null as any;
-
-const aviationstack = new AviationstackClient(AVIATIONSTACK_KEY || '');
-const notificationService = new NotificationService();
-
-function computeHash(state: FlightState): string {
-  if (!state) return '';
-  return crypto.createHash('sha256').update(JSON.stringify(state)).digest('hex');
+function formatDt(dt: Date | string | null | undefined): string {
+  if (!dt) return '—';
+  const d = dt instanceof Date ? dt : new Date(dt);
+  return d.toUTCString().replace(/:\d\d GMT$/, ' UTC').replace(/\s+/, ' ');
 }
 
-function computeNextCheck(state: FlightState): Date {
-  const now = new Date();
-  const depTime = new Date(state.dep_estimated || state.dep_scheduled || now);
-  const arrTime = new Date(state.arr_estimated || state.arr_scheduled || now);
-  
-  const diffToDep = depTime.getTime() - now.getTime();
-  const diffToArr = arrTime.getTime() - now.getTime();
-
-  // Smart Polling Logic
-  if (state.flight_status === 'landed' || state.flight_status === 'cancelled') {
-    return new Date(now.getTime() + 24 * 60 * 60 * 1000); // Check again in 24h (or mark inactive)
-  }
-
-  if (diffToDep > 6 * 60 * 60 * 1000) {
-    // More than 6h before departure
-    return new Date(depTime.getTime() - 6 * 60 * 60 * 1000);
-  } else if (diffToDep > -2 * 60 * 60 * 1000) {
-    // Within 6h before to 2h after departure
-    return new Date(now.getTime() + 15 * 60 * 1000);
-  } else if (diffToArr > -2 * 60 * 60 * 1000) {
-    // Within 2h after departure to 2h after arrival
-    return new Date(now.getTime() + 20 * 60 * 1000);
-  }
-
-  return new Date(now.getTime() + 24 * 60 * 60 * 1000);
+function formatVal(val: any): string {
+  if (val === null || val === undefined || val === '') return '—';
+  if (typeof val === 'string') return val;
+  if (typeof val === 'number') return `${val} min`;
+  return JSON.stringify(val);
 }
 
-async function sendNotifications(event: any, flight: any) {
-  // 1. Fetch trip and group info
-  const { data: trip } = await supabase.from('trips').select('group_name').eq('id', flight.trip_id).single();
-  const groupName = trip?.group_name || 'Your Trip';
-
-  // 2. Fetch followers
-  const { data: followers } = await supabase
-    .from('flight_followers')
-    .select('*, contacts(*)')
-    .eq('flight_id', flight.id);
-
-  // 3. Format message
-  const { subject, body } = formatNotification(event.event_type as EventType, flight.flight_iata, groupName, event.new_state);
-
-  // 4. Send to each follower
-  for (const follower of followers || []) {
-    const contact = follower.contacts;
-    if (!contact) continue;
-
-    if (follower.notify_email && contact.email) {
-      const result = await notificationService.sendEmail({ to: contact.email, subject, body });
-      await supabase.from('notifications').insert({
-        event_id: event.id,
-        contact_id: contact.id,
-        channel: 'EMAIL',
-        to_address: contact.email,
-        status: result.status,
-        provider_message_id: result.provider_message_id,
-        error: result.error
-      });
-    }
-
-    if (follower.notify_sms && contact.phone_e164) {
-      const result = await notificationService.sendSMS(contact.phone_e164, body);
-      await supabase.from('notifications').insert({
-        event_id: event.id,
-        contact_id: contact.id,
-        channel: 'SMS',
-        to_address: contact.phone_e164,
-        status: result.status,
-        provider_message_id: result.provider_message_id,
-        error: result.error
-      });
-    }
-  }
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 async function processFlight(flight: any) {
-  console.log(`Processing flight ${flight.flight_iata} for trip ${flight.trip_id}`);
+  if (flight.pollingPaused || flight.status === 'LANDED' || flight.status === 'CANCELLED') return;
 
-  const response = await aviationstack.getFlight(flight.flight_iata, flight.flight_date_local);
+  const now = new Date();
+  if (flight.nextPollAt && flight.nextPollAt > now) return;
+  if (flight.pollingLocked) return;
 
-  if (response.error) {
-    console.error(`API Error for ${flight.flight_iata}:`, response.error);
-    if (response.error.code === 'usage_limit_reached') {
-      await supabase.from('settings').update({ aviationstack_paused: true, pause_reason: 'Usage limit reached' }).eq('id', 1);
-      return false; // Stop processing
+  await prisma.flight.update({ where: { id: flight.id }, data: { pollingLocked: true } });
+
+  try {
+    const liveData = await fetchFlight(flight.flightIata, flight.flightDate);
+    if (!liveData) {
+      console.log(`[worker] No data for ${flight.flightIata} ${flight.flightDate}`);
+      const nextMs = getNextPollMs(flight.depScheduled ? new Date(flight.depScheduled) : null, now);
+      const nextPollAt = nextMs === 0 ? null : new Date(now.getTime() + nextMs);
+      await prisma.flight.update({
+        where: { id: flight.id },
+        data: { lastPolledAt: now, nextPollAt, pollingLocked: false }
+      });
+      return;
     }
-    
-    await supabase.from('flights').update({
-      tracking_error_code: response.error.code,
-      tracking_error_message: response.error.message,
-      next_check_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
-    }).eq('id', flight.id);
-    return true;
-  }
 
-  const bestMatch = response.data[0]; // Simplified: take the first one
-  if (!bestMatch) {
-    console.log(`No data found for ${flight.flight_iata} on ${flight.flight_date_local}`);
-    await supabase.from('flights').update({
-      last_checked_at: new Date().toISOString(),
-      next_check_at: new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString() // Retry in 4h
-    }).eq('id', flight.id);
-    return true;
-  }
+    const oldHash = flight.dataHash;
+    const newHashData = {
+      status: liveData.flight_status,
+      dep_estimated: liveData.dep_estimated,
+      dep_actual: liveData.dep_actual,
+      arr_actual: liveData.arr_actual,
+      terminal_dep: liveData.terminal_dep,
+      gate_dep: liveData.gate_dep,
+      terminal_arr: liveData.terminal_arr,
+      gate_arr: liveData.gate_arr,
+      delay_dep_min: liveData.delay_dep_min,
+    };
+    const newHash = hash(newHashData);
 
-  const newState = aviationstack.normalize(bestMatch);
-  const newHash = computeHash(newState);
+    if (oldHash !== newHash) {
+      const oldState = flight.lastState ? JSON.parse(flight.lastState) : null;
+      const events = detectEvents(flight.id, oldState, liveData);
 
-  // Get latest snapshot
-  const { data: latestSnapshot } = await supabase
-    .from('flight_snapshots')
-    .select('hash, payload')
-    .eq('flight_id', flight.id)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .single();
+      console.log(`[worker] ${flight.flightIata}: ${events.length} event(s) (status=${liveData.flight_status})`);
+      for (const evt of events) {
+        const created = await prisma.flightEvent.upsert({
+          where: { eventKey: evt.key },
+          create: { flightId: flight.id, eventType: evt.type as any, eventKey: evt.key, oldValue: evt.oldValue, newValue: evt.newValue },
+          update: {}
+        });
+        await fireNotifications(flight, created, evt.type);
+      }
 
-  const oldState = latestSnapshot ? (latestSnapshot.payload as unknown as FlightState) : null;
+      await prisma.flight.update({
+        where: { id: flight.id },
+        data: {
+          status: liveData.flight_status as any,
+          depScheduled: liveData.dep_scheduled ? new Date(liveData.dep_scheduled) : undefined,
+          depEstimated: liveData.dep_estimated ? new Date(liveData.dep_estimated) : undefined,
+          depActual: liveData.dep_actual ? new Date(liveData.dep_actual) : undefined,
+          arrScheduled: liveData.arr_scheduled ? new Date(liveData.arr_scheduled) : undefined,
+          arrEstimated: liveData.arr_estimated ? new Date(liveData.arr_estimated) : undefined,
+          arrActual: liveData.arr_actual ? new Date(liveData.arr_actual) : undefined,
+          terminalDep: liveData.terminal_dep,
+          gateDep: liveData.gate_dep,
+          terminalArr: liveData.terminal_arr,
+          gateArr: liveData.gate_arr,
+          delayDepMin: liveData.delay_dep_min,
+          delayArrMin: liveData.delay_arr_min,
+          dataHash: newHash,
+          lastState: JSON.stringify(liveData),
+        }
+      });
+    } else {
+      console.log(`[worker] ${flight.flightIata}: no change (hash match)`);
+    }
 
-  if (!latestSnapshot || latestSnapshot.hash !== newHash) {
-    console.log(`Change detected for ${flight.flight_iata}`);
-    
-    // Save snapshot
-    await supabase.from('flight_snapshots').insert({
-      flight_id: flight.id,
-      hash: newHash,
-      payload: newState
+    const nextMs = getNextPollMs(flight.depScheduled ? new Date(flight.depScheduled) : null, now);
+    const nextPollAt = nextMs === 0 ? null : new Date(now.getTime() + nextMs);
+    await prisma.flight.update({
+      where: { id: flight.id },
+      data: { lastPolledAt: now, nextPollAt, pollingLocked: false, pollingPaused: nextMs === 0 }
     });
 
-    // Detect and emit events
-    const events = detectEvents(flight.id, oldState, newState);
-    for (const event of events) {
-      const { data: insertedEvent, error: eventError } = await supabase
-        .from('flight_events')
-        .insert({
-          flight_id: flight.id,
-          event_type: event.type,
-          event_key: event.key,
-          old_state: event.oldState,
-          new_state: event.newState
-        })
-        .select()
-        .single();
-
-      if (!eventError && insertedEvent) {
-        console.log(`Emitted event: ${event.type} for ${flight.flight_iata}`);
-        await sendNotifications(insertedEvent, flight);
-      }
-    }
-
-    // Update flight
-    await supabase.from('flights').update({
-      ...newState,
-      last_payload: bestMatch,
-      last_checked_at: new Date().toISOString(),
-      next_check_at: computeNextCheck(newState).toISOString()
-    }).eq('id', flight.id);
-  } else {
-    console.log(`No change for ${flight.flight_iata}`);
-    await supabase.from('flights').update({
-      last_checked_at: new Date().toISOString(),
-      next_check_at: computeNextCheck(newState).toISOString()
-    }).eq('id', flight.id);
+  } catch (err: any) {
+    console.error(`[worker] Error polling ${flight.flightIata}:`, err.message);
+    await prisma.flight.update({ where: { id: flight.id }, data: { pollingLocked: false } });
   }
-
-  return true;
 }
 
-async function run() {
-  if (!supabase) {
-    console.error('Worker cannot run: Supabase client not initialized.');
-    return;
-  }
-  console.log('Worker cycle started at:', new Date().toISOString());
+async function fireNotifications(flight: any, event: any, eventType: string) {
+  const rule = await prisma.alertRule.findUnique({
+    where: { workspaceId_eventType: { workspaceId: flight.workspaceId, eventType: eventType as any } }
+  });
 
-  // Check if paused
-  const { data: settings } = await supabase.from('settings').select('*').eq('id', 1).single();
-  if (settings?.aviationstack_paused) {
-    console.log('Polling is paused globally.');
-    return;
-  }
+  const staffEnabled = rule ? rule.staffEnabled : true;
+  const customerEnabled = rule ? rule.customerEnabled : false;
 
-  // Get due flights
-  const { data: dueFlights, error } = await supabase
-    .from('flights')
-    .select('*')
-    .eq('is_active', true)
-    .is('tracking_paused_reason', null)
-    .or(`next_check_at.is.null,next_check_at.lte.${new Date().toISOString()}`)
-    .limit(20);
+  const orderFlights = await prisma.orderFlight.findMany({
+    where: { flightId: flight.id },
+    include: { order: true }
+  });
+  const orderRef = orderFlights.length > 0
+    ? orderFlights.map((of: any) => of.order.reference).join(', ')
+    : '—';
 
-  if (error) {
-    console.error('Error fetching due flights:', error);
-    return;
+  if (staffEnabled) {
+    const recipients = await prisma.notificationRecipient.findMany({
+      where: { workspaceId: flight.workspaceId, type: { in: ['STAFF', 'OPS'] }, isActive: true }
+    });
+    for (const r of recipients) {
+      await sendAndLog(flight, event, r.email, r.name, eventType, orderRef);
+    }
   }
 
-  console.log(`Found ${dueFlights?.length || 0} due flights`);
-
-  for (const flight of dueFlights || []) {
-    const shouldContinue = await processFlight(flight);
-    if (!shouldContinue) break;
+  if (customerEnabled && !flight.holdCustomerNotifications) {
+    const recipients = await prisma.notificationRecipient.findMany({
+      where: { workspaceId: flight.workspaceId, type: 'CUSTOMER', isActive: true }
+    });
+    for (const r of recipients) {
+      await sendAndLog(flight, event, r.email, r.name, eventType, orderRef);
+    }
   }
+}
 
-  console.log('Worker cycle finished at:', new Date().toISOString());
+async function sendAndLog(flight: any, event: any, email: string, name: string | null, eventType: string, orderRef: string) {
+  const params = {
+    flightIata:   flight.flightIata,
+    airline:      flight.airline || '—',
+    origin:       flight.origin || '—',
+    destination:  flight.destination || '—',
+    originCity:   flight.originCity || '',
+    destCity:     flight.destinationCity || '',
+    depScheduled: formatDt(flight.depScheduled),
+    arrScheduled: formatDt(flight.arrScheduled),
+    depEstimated: formatDt(flight.depEstimated),
+    delayDepMin:  flight.delayDepMin || 0,
+    gateDep:      flight.gateDep || '',
+    terminalDep:  flight.terminalDep || '',
+    gateArr:      flight.gateArr || '',
+    terminalArr:  flight.terminalArr || '',
+    oldValue:     formatVal(event.oldValue),
+    newValue:     formatVal(event.newValue),
+    orderRef,
+    dashboardUrl: 'https://flights.travelbiuro.com/dashboard/flights/' + flight.id,
+  };
+
+  const EVENT_SUBJECTS: Record<string, string> = {
+    CANCELLED:       `CANCELLED: ${flight.flightIata} (${flight.origin}→${flight.destination})`,
+    DIVERTED:        `DIVERTED: ${flight.flightIata} (${flight.origin}→${flight.destination})`,
+    DELAY_30:        `DELAY ${formatVal(event.newValue)}: ${flight.flightIata} (${flight.origin}→${flight.destination})`,
+    DELAY_60:        `DELAY ${formatVal(event.newValue)}: ${flight.flightIata} (${flight.origin}→${flight.destination})`,
+    DELAY_120:       `DELAY ${formatVal(event.newValue)}: ${flight.flightIata} (${flight.origin}→${flight.destination})`,
+    GATE_ASSIGNED:   `GATE ASSIGNED ${formatVal(event.newValue)}: ${flight.flightIata} (${flight.origin}→${flight.destination})`,
+    GATE_CHANGE:     `GATE CHANGE → ${formatVal(event.newValue)}: ${flight.flightIata} (${flight.origin}→${flight.destination})`,
+    TERMINAL_CHANGE: `TERMINAL CHANGE → ${formatVal(event.newValue)}: ${flight.flightIata} (${flight.origin}→${flight.destination})`,
+    SCHEDULE_CHANGE: `RESCHEDULED → ${formatVal(event.newValue)}: ${flight.flightIata} (${flight.origin}→${flight.destination})`,
+    DEPARTED:        `DEPARTED ${formatVal(event.newValue)}: ${flight.flightIata} (${flight.origin}→${flight.destination})`,
+    ARRIVED:         `ARRIVED ${formatVal(event.newValue)}: ${flight.flightIata} (${flight.origin}→${flight.destination})`,
+    BOARDING:        `BOARDING: ${flight.flightIata} — Gate ${flight.gateDep || '?'} (${flight.origin}→${flight.destination})`,
+    STATUS_CHANGE:   `${flight.flightIata} is now ${formatVal(event.newValue)} (${flight.origin}→${flight.destination})`,
+  };
+  const fallbackSubject = EVENT_SUBJECTS[eventType] || `[${flight.flightIata}] ${eventType.replace(/_/g, ' ')}`;
+  const fallbackHtml = buildFallbackHtml(flight.flightIata, eventType, event.oldValue, event.newValue, params);
+
+  try {
+    await sendAlert({ to: [{ email, name: name ?? undefined }], eventType, params, fallbackSubject, fallbackHtml });
+    await prisma.notification.create({
+      data: {
+        flightId: flight.id, eventId: event.id, recipientEmail: email, recipientName: name,
+        subject: fallbackSubject, body: fallbackHtml, status: 'SENT', sentAt: new Date(), provider: 'brevo'
+      }
+    });
+    console.log(`[worker] Email SENT to ${email} for ${eventType}`);
+  } catch (err: any) {
+    await prisma.notification.create({
+      data: {
+        flightId: flight.id, eventId: event.id, recipientEmail: email, recipientName: name,
+        subject: fallbackSubject, body: fallbackHtml, status: 'FAILED', error: err.message, provider: 'brevo'
+      }
+    });
+    console.error(`[worker] Email FAILED to ${email}:`, err.message);
+  }
+}
+
+async function mainLoop() {
+  console.log('[worker] Starting poll cycle...');
+
+  // Auto-release locks stuck for more than 5 minutes (crash recovery)
+  const released = await prisma.flight.updateMany({
+    where: { pollingLocked: true, updatedAt: { lt: new Date(Date.now() - 5 * 60 * 1000) } },
+    data: { pollingLocked: false }
+  });
+  if (released.count > 0) console.log(`[worker] Released ${released.count} stale lock(s)`);
+
+  const flights = await prisma.flight.findMany({
+    where: { pollingPaused: false, status: { notIn: ['LANDED', 'CANCELLED'] } }
+  });
+  console.log(`[worker] ${flights.length} active flights to check`);
+
+  // Sequential with 1.5s gap to avoid AeroDataBox rate limits
+  for (const flight of flights) {
+    await processFlight(flight);
+    await sleep(1500);
+  }
 }
 
 async function start() {
-  const isContinuous = process.env.RUN_CONTINUOUS === 'true' || process.env.SERVICE_TYPE === 'combined' || !process.env.SERVICE_TYPE;
-  
-  if (isContinuous) {
-    console.log('Worker running in continuous mode (every 10 minutes)');
-    while (true) {
-      try {
-        await run();
-      } catch (err) {
-        console.error('Iteration error:', err);
-      }
-      // Wait 10 minutes
-      await new Promise(resolve => setTimeout(resolve, 10 * 60 * 1000));
-    }
-  } else {
-    await run();
-    process.exit(0);
-  }
+  console.log('[worker] Flight Tracker Worker started');
+  await mainLoop();
+  setInterval(mainLoop, POLL_INTERVAL_MS);
 }
 
-start().catch(err => {
-  console.error('Fatal error:', err);
-  process.exit(1);
-});
+start().catch(console.error);

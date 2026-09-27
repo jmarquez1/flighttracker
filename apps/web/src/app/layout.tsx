@@ -1,25 +1,22 @@
-import './globals.css'
-import type { Metadata } from 'next'
-import { Inter, JetBrains_Mono } from 'next/font/google'
+import type { Metadata } from 'next';
+import { JetBrains_Mono } from 'next/font/google';
+import './globals.css';
 
-const inter = Inter({ subsets: ['latin'], variable: '--font-sans' })
-const mono = JetBrains_Mono({ subsets: ['latin'], variable: '--font-mono' })
+const mono = JetBrains_Mono({
+  subsets: ['latin'],
+  variable: '--font-mono',
+  display: 'swap',
+});
 
 export const metadata: Metadata = {
-  title: 'SKY-TRACK // Intelligent Flight Monitoring',
-  description: 'Automated flight tracking and real-time notifications for professional travel groups.',
-}
+  title: 'Flight Control — Travel Biuro',
+  description: 'Real-time flight monitoring for Travel Biuro operations',
+};
 
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode
-}) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${inter.variable} ${mono.variable}`}>
-      <body className="bg-[#050505] text-[#e0e0e0] antialiased selection:bg-indigo-500 selection:text-white">
-        {children}
-      </body>
+    <html lang="en" className={mono.variable}>
+      <body className="bg-zinc-950 text-zinc-100 font-mono min-h-screen">{children}</body>
     </html>
-  )
+  );
 }
