@@ -5,7 +5,7 @@ Plataforma SaaS para el seguimiento de vuelos y notificaciones automáticas para
 ## Estructura del Proyecto
 
 - `apps/web`: Aplicación Next.js 14 con Dashboard administrativo y Portal Público.
-- `apps/worker`: Servicio de polling inteligente (Cron) para Railway.
+- `apps/worker`: Servicio de polling inteligente (pm2 `flighttracker-worker` en el servidor OVH).
 - `packages/shared`: Tipos y lógica compartida.
 - `supabase/migrations`: Esquema de base de datos con RLS.
 
@@ -44,15 +44,11 @@ npm run dev:web    # Inicia Next.js
 npm run dev:worker # Inicia el Worker (polling)
 ```
 
-## Despliegue en Railway (Actualizado)
+## Despliegue
 
-1. Conecta tu repositorio de GitHub.
-2. **Servicio Web**: Crea un servicio para `apps/web`.
-   - Variable `SERVICE_TYPE` = `web`
-3. **Servicio Worker**: Crea un servicio para `apps/worker`.
-   - Variable `SERVICE_TYPE` = `worker`
-   - Configura un **Cron Schedule** (ej: `*/10 * * * *`) para ejecutar `npm start`.
-4. **Variables de Entorno**: Asegúrate de que las variables `NEXT_PUBLIC_SUPABASE_URL` y `NEXT_PUBLIC_SUPABASE_ANON_KEY` estén configuradas correctamente en Railway.
+Corre en el servidor de producción OVH (`/var/www/flighttracker`, pm2 `flighttracker-web` + `flighttracker-worker`,
+puerto 3007, flights.travelbiuro.com), con la base de datos PostgreSQL `flighttracker` en el mismo servidor.
+Desde el servidor de desarrollo: commit en `main` y `deploy flighttracker`.
 
 ## Roles del Sistema
 
